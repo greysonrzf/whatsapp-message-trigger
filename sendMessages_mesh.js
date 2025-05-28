@@ -9,10 +9,10 @@ const CSV_FILE = 'teste.csv';
 const DATABASE_FILE = 'database.db';
 
 const API_ENDPOINTS = [
-    'http://localserver.tortoise-sirius.ts.net:3001',
-    'http://localserver.tortoise-sirius.ts.net:3002',
-    'http://localserver.tortoise-sirius.ts.net:3003',
-    'http://localserver.tortoise-sirius.ts.net:3004'
+    'http://localhost:3001',
+    'http://localhost:3002',
+    'http://localhost:3003',
+    'http://localhost:3004'
 ];
 
 // Caminho do arquivo CSV
