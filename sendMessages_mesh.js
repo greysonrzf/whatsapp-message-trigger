@@ -4,10 +4,20 @@ const csv = require('csv-parser');
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 
+// PARAMETROS
+
+// Nome do arquivo CSV contendo os leads que serão lidos, o arquivo deve estar na pasta csv
 const CSV_FILE = 'teste.csv';
 
+// Nome do arquivo do banco de dados SQLite que será gerado automaticamente com os dados de envio
 const DATABASE_FILE = 'database.db';
 
+// Configuração do horário de funcionamento (segunda a sexta, das 8h às 17h)
+// Formato cron: minuto hora dia-do-mês mês dia-da-semana
+// 0 8-17 * * 1-5 = das 8h às 17h, segunda a sexta
+const CRON_SETTINGS = '0 8-17 * * 1-5';
+
+// Incluir as URLs das APIs Whatsapp aqui
 const API_ENDPOINTS = [
     'http://localhost:3001',
     'http://localhost:3002',
@@ -15,10 +25,12 @@ const API_ENDPOINTS = [
     'http://localhost:3004'
 ];
 
+// INICIO DO SCRIPT
+
 // Caminho do arquivo CSV
 const CSV_FILE_PATH = path.join(__dirname, 'csv', CSV_FILE);
 
-// Configuração do banco de dados SQLite
+// Caminho do arquivo do banco de dados SQLite
 const dbPath = path.join(__dirname, 'db', DATABASE_FILE);
 const db = new sqlite3.Database(dbPath);
 
@@ -38,8 +50,61 @@ db.serialize(() => {
     });
 });
 
-
+// Variável global para controlar o índice da API atual
 let currentApiIndex = 0;
+
+// Função para verificar se estamos no horário comercial
+function isBusinessHours() {
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0 = domingo, 1 = segunda, ..., 6 = sábado
+    const hour = now.getHours();
+    
+    // Segunda a sexta (1-5) das 8h às 17h
+    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    const isBusinessHour = hour >= 8 && hour <= 17;
+    
+    return isWeekday && isBusinessHour;
+}
+
+// Função para calcular próximo horário comercial
+function getNextBusinessTime() {
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const hour = now.getHours();
+    
+    // Se é fim de semana (sábado ou domingo)
+    if (dayOfWeek === 0 || dayOfWeek === 6) {
+        const nextMonday = new Date(now);
+        const daysUntilMonday = dayOfWeek === 0 ? 1 : 2; // Se domingo = 1 dia, se sábado = 2 dias
+        nextMonday.setDate(now.getDate() + daysUntilMonday);
+        nextMonday.setHours(8, 0, 0, 0);
+        return nextMonday;
+    }
+    
+    // Se é dia útil mas fora do horário
+    if (hour < 8) {
+        // Antes das 8h - aguardar até 8h do mesmo dia
+        const nextTime = new Date(now);
+        nextTime.setHours(8, 0, 0, 0);
+        return nextTime;
+    } else if (hour > 17) {
+        // Depois das 17h - aguardar até 8h do próximo dia útil
+        const nextTime = new Date(now);
+        if (dayOfWeek === 5) { // Se é sexta, próximo dia útil é segunda
+            nextTime.setDate(now.getDate() + 3);
+        } else {
+            nextTime.setDate(now.getDate() + 1);
+        }
+        nextTime.setHours(8, 0, 0, 0);
+        return nextTime;
+    }
+    
+    return now; // Já estamos no horário comercial
+}
+
+// Variável global para controlar o estado do processamento
+let isProcessing = false;
+let pendingRows = [];
 
 // Função para verificar autenticação da API
 async function checkApiAuth(apiBaseUrl) {
@@ -146,12 +211,43 @@ async function sendMessage(name, phone, message) {
 
 // Função para processar as linhas do CSV em sequência
 async function processRows(rows) {
+    // Se não estamos mais processando, parar
+    if (!isProcessing) {
+        console.log('Processamento pausado devido ao horário não comercial.');
+        return;
+    }
+
     if (rows.length === 0) {
         console.log('Todas as mensagens foram enviadas.');
+        isProcessing = false;
+        pendingRows = [];
+        return;
+    }
+
+    // Verificar se estamos no horário comercial
+    if (!isBusinessHours()) {
+        const nextBusinessTime = getNextBusinessTime();
+        const now = new Date();
+        const waitTime = nextBusinessTime.getTime() - now.getTime();
+        
+        console.log(`Fora do horário comercial. Próximo envio será em: ${nextBusinessTime.toLocaleString()}`);
+        console.log(`Aguardando ${Math.round(waitTime / 1000 / 60)} minutos até o próximo horário comercial...`);
+        
+        isProcessing = false;
+        pendingRows = rows; // Salvar as linhas pendentes
+        
+        // Aguardar até o próximo horário comercial e tentar novamente
+        setTimeout(() => {
+            if (pendingRows.length > 0) {
+                isProcessing = true;
+                processRows(pendingRows);
+            }
+        }, waitTime);
         return;
     }
 
     const { nome, whatsapp } = rows.shift(); // Remove e obtém o primeiro elemento do array
+    pendingRows = rows; // Atualizar as linhas pendentes
 
     // Formata o número e verifica se já existe na base de dados
     const formattedPhone = formatPhoneNumber(whatsapp);
@@ -178,11 +274,18 @@ async function processRows(rows) {
     const now = new Date();
     const nextExecutionTime = new Date(now.getTime() + delay);
     console.log(`A próxima mensagem será enviada em: ${nextExecutionTime.toLocaleTimeString()}. Intervalo de ${(delay / 1000 / 60).toFixed(2)} minutos.`);
-    setTimeout(() => processRows(rows), delay);
+    console.log(`Restam ${rows.length} mensagens para enviar.`);
+    
+    setTimeout(() => {
+        if (isProcessing) {
+            processRows(rows);
+        }
+    }, delay);
 }
 
 // Lendo o arquivo CSV
 console.log('Iniciando a leitura do arquivo CSV...');
+console.log(`Configuração de horário: ${CRON_SETTINGS} (Segunda a Sexta, 8h às 17h)`);
 
 const rows = [];
 
@@ -196,6 +299,59 @@ fs.createReadStream(CSV_FILE_PATH)
         }
     })
     .on('end', () => {
-        console.log('Processamento do CSV concluído. Iniciando o envio de mensagens...');
-        processRows(rows); // Inicia o processamento das linhas
+        console.log('Processamento do CSV concluído.');
+        console.log(`Total de ${rows.length} registros carregados.`);
+        
+        // Iniciar o monitor de horário comercial
+        startBusinessHoursMonitor();
+        
+        // Iniciar o processamento com controle de horário
+        startProcessing(rows);
     });
+
+// Função para monitorar horário comercial a cada 5 minutos
+function startBusinessHoursMonitor() {
+    const checkInterval = 5 * 60 * 1000; // 5 minutos em milissegundos
+    
+    setInterval(() => {
+        const now = new Date();
+        const inBusinessHours = isBusinessHours();
+        
+        console.log(`[${now.toLocaleString()}] Verificação de horário comercial: ${inBusinessHours ? 'ATIVO' : 'INATIVO'}`);
+        
+        if (!inBusinessHours && isProcessing) {
+            console.log('Saindo do horário comercial. Pausando envio de mensagens...');
+            isProcessing = false;
+        } else if (inBusinessHours && !isProcessing && pendingRows.length > 0) {
+            console.log('Entrando no horário comercial. Retomando envio de mensagens...');
+            isProcessing = true;
+            processRows(pendingRows);
+        }
+    }, checkInterval);
+    
+    console.log('Monitor de horário comercial iniciado. Verificação a cada 5 minutos.');
+}
+
+// Função para iniciar o processamento com controle de horário
+function startProcessing(rows) {
+    pendingRows = [...rows]; // Copia o array de linhas
+    
+    if (isBusinessHours()) {
+        console.log('Iniciando processamento no horário comercial...');
+        isProcessing = true;
+        processRows(pendingRows);
+    } else {
+        const nextBusinessTime = getNextBusinessTime();
+        console.log(`Fora do horário comercial. Processamento iniciará em: ${nextBusinessTime.toLocaleString()}`);
+        
+        // Aguardar até o próximo horário comercial
+        const waitTime = nextBusinessTime.getTime() - new Date().getTime();
+        setTimeout(() => {
+            if (pendingRows.length > 0) {
+                console.log('Iniciando processamento no horário comercial...');
+                isProcessing = true;
+                processRows(pendingRows);
+            }
+        }, waitTime);
+    }
+}
